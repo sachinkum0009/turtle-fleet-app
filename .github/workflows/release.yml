@@ -1,0 +1,264 @@
+# Release: this repository's `main`, as the next version (the
+# per-repository release design of 2026-09-23, in fleetless/fleetless).
+#
+# Press "Run workflow" on main. The version comes from the Conventional
+# Commits since the last tag (.github/release/release.mjs); the first is
+# 1.0.0. CHANGELOG.md's "## [Unreleased]" becomes that version in a pull
+# request; the button run turns on GitHub auto-merge and ends. GitHub runs
+# the required `verify` check and merges the PR once it passes; that merge
+# starts this workflow again (the `pull_request: closed` trigger), which
+# tags the merged commit, and the GitHub release carries that version's
+# notes. Nothing is built or deployed: a template's release is its changelog
+# and its tag.
+#
+# A run that failed can be started again: an open release PR is reused and
+# rebuilt on the current `main` (auto-merge enabled again), a merged release
+# commit is tagged, a tag already on HEAD continues that release, and an
+# existing GitHub release is left alone.
+name: release
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: auto, from the commits; an override only raises it
+        type: choice
+        options: [auto, patch, minor, major]
+        default: auto
+  # The second half of a release: the App merged the release PR, so this run
+  # tags and releases. A normal pull request closed ends green and does
+  # nothing (continuation answers nothing).
+  pull_request:
+    types: [closed]
+    branches: [main]
+
+concurrency:
+  # Only a release joins the `release` group. Every pull request that closes
+  # starts this workflow too, and a run queued in a group cancels the one
+  # already pending there: a no-op close must never cancel a pending release.
+  group: ${{ (github.event_name != 'pull_request' || (startsWith(github.event.pull_request.head.ref, 'release/') && github.event.pull_request.head.repo.full_name == github.repository)) && 'release' || format('release-noop-{0}', github.run_id) }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tagged: ${{ steps.version.outputs.tagged }}
+      continue: ${{ steps.version.outputs.continue }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event_name == 'pull_request' && 'main' || github.sha }}
+          fetch-depth: 0
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          package-manager-cache: false
+      - name: main, and nothing but main
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        run: |
+          set -euo pipefail
+          [ "$GITHUB_REF" = refs/heads/main ] || { echo "Release runs on main, not $GITHUB_REF" >&2; exit 1; }
+          git fetch -q origin main
+          [ "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" ] || { echo "main moved after this run started; run it again" >&2; exit 1; }
+      - name: the version
+        id: version
+        env:
+          BUMP: ${{ inputs.bump }}
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
+            # The merge that starts this run. `continuation` refuses a
+            # release branch from a fork or merged by a person; a normal
+            # pull request closed prints nothing and every later job skips.
+            version="$(node .github/release/release.mjs continuation --event "$GITHUB_EVENT_PATH")"
+            if [ -z "$version" ]; then
+              echo "continue=false" >> "$GITHUB_OUTPUT"
+              echo "version=" >> "$GITHUB_OUTPUT"
+              echo "tagged=false" >> "$GITHUB_OUTPUT"
+              echo "a pull request closed; nothing to release"
+              exit 0
+            fi
+            echo "version=$version" >> "$GITHUB_OUTPUT"
+            echo "continue=true" >> "$GITHUB_OUTPUT"
+            tag="$(node .github/release/release.mjs tag-at-head)"
+            if [ -n "$tag" ]; then echo "tagged=true" >> "$GITHUB_OUTPUT"; else echo "tagged=false" >> "$GITHUB_OUTPUT"; fi
+            echo "$version continues from the merged release PR"
+            exit 0
+          fi
+          tag="$(node .github/release/release.mjs tag-at-head)"
+          if [ -n "$tag" ]; then
+            echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+            echo "tagged=true" >> "$GITHUB_OUTPUT"
+            echo "continue=true" >> "$GITHUB_OUTPUT"
+            echo "HEAD already carries $tag: continuing that release"
+            exit 0
+          fi
+          version="$(node .github/release/release.mjs next --bump "$BUMP" --first 1.0.0)"
+          # The changelog is refused here, on a copy, before a branch or a
+          # pull request exists: an empty Unreleased is a release without notes.
+          cp CHANGELOG.md "$RUNNER_TEMP/CHANGELOG.md"
+          node .github/release/release.mjs rotate --file "$RUNNER_TEMP/CHANGELOG.md" --version "$version" --date "$(date -u +%F)"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tagged=false" >> "$GITHUB_OUTPUT"
+          echo "continue=true" >> "$GITHUB_OUTPUT"
+
+  release-commit:
+    needs: prepare
+    if: ${{ needs.prepare.outputs.continue == 'true' }}
+    runs-on: ubuntu-latest
+    outputs:
+      commit: ${{ steps.commit.outputs.commit }}
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+      TAGGED: ${{ needs.prepare.outputs.tagged }}
+      PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event_name == 'pull_request' && 'main' || github.sha }}
+          fetch-depth: 0
+          # A persisted checkout credential is a URL-scoped extraheader that
+          # beats the one the push below brings, and the branch would go up as
+          # github-actions[bot] — a push that starts no workflow, so the
+          # release PR would never get its required check.
+          persist-credentials: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          package-manager-cache: false
+      - uses: actions/create-github-app-token@v3
+        id: app
+        with:
+          app-id: ${{ secrets.FLEETLESS_APP_ID }}
+          private-key: ${{ secrets.FLEETLESS_APP_PRIVATE_KEY }}
+          owner: fleetless
+          repositories: app-starter
+          permission-contents: write
+          permission-pull-requests: write
+          # auto-merge reads the release PR's check runs, and check-passed
+          # reads them again before the continuation tags.
+          permission-checks: read
+      - name: the release commit, through a pull request
+        id: commit
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
+            # The continuation: the merge already happened, so the release
+            # commit is on main. Belt and braces before the tag: the merged
+            # head passed its required check.
+            commit="$(node .github/release/release.mjs release-commit --version "$VERSION")"
+            if [ -z "$commit" ]; then
+              echo "the merged release commit for $VERSION is not on main" >&2; exit 1
+            fi
+            node .github/release/release.mjs check-passed --sha "$PR_HEAD_SHA" --check verify
+            echo "commit=$commit" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "$TAGGED" = true ]; then
+            echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          # Merged by an earlier run that died before the tag: tag that commit.
+          merged="$(node .github/release/release.mjs release-commit --version "$VERSION")"
+          if [ -n "$merged" ]; then
+            echo "commit=$merged" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          branch="release/$VERSION"
+          # Past the two early exits the branch is rebuilt every time on this
+          # job's HEAD, which is current main. A failed run leaves a release PR
+          # that main soon moves past, or one carrying a red check, and
+          # auto-merge refuses both for ever -- reusing such a PR untouched makes
+          # every later run fail the same way. The force-push puts it back on
+          # today's main and restarts its required check.
+          git switch -q -c "$branch"
+          node .github/release/release.mjs rotate --file CHANGELOG.md --version "$VERSION" --date "$(date -u +%F)"
+          git -c user.name="fleetless-release[bot]" -c user.email="fleetless-release[bot]@users.noreply.github.com" \
+            commit -q -am "chore(release): $VERSION"
+          # The header through git's env-var config, not `-c` on the command
+          # line: an argv is visible to anything that lists processes.
+          auth="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          GIT_CONFIG_COUNT=1 \
+          GIT_CONFIG_KEY_0="http.https://github.com/.extraheader" \
+          GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $auth" \
+            git push -q --force origin "HEAD:refs/heads/$branch"
+          # Without --find-only this answers the open PR's number when there is
+          # one, and opens a PR when there is not.
+          number="$(node .github/release/release.mjs release-pr --version "$VERSION" --branch "$branch")"
+          echo "release PR #$number"
+          # Auto-merge ends this run at the open PR: no job waits for the
+          # check any more. The merge starts this workflow again.
+          outcome="$(node .github/release/release.mjs auto-merge --number "$number")"
+          if [ "$outcome" = merged ]; then
+            commit="$(node .github/release/release.mjs release-commit --version "$VERSION")"
+            echo "commit=$commit" >> "$GITHUB_OUTPUT"
+          else
+            {
+              echo "### release PR #$number — $VERSION"
+              echo
+              echo "Auto-merge $outcome; the release continues when it merges: https://github.com/$GITHUB_REPOSITORY/pull/$number"
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  release:
+    needs: [prepare, release-commit]
+    if: ${{ needs.release-commit.outputs.commit != '' }}
+    runs-on: ubuntu-latest
+    permissions:
+      # The GitHub release is created with GITHUB_TOKEN; the tag, with the App.
+      contents: write
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+      COMMIT: ${{ needs.release-commit.outputs.commit }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.release-commit.outputs.commit }}
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          package-manager-cache: false
+      - uses: actions/create-github-app-token@v3
+        id: app
+        with:
+          app-id: ${{ secrets.FLEETLESS_APP_ID }}
+          private-key: ${{ secrets.FLEETLESS_APP_PRIVATE_KEY }}
+          owner: fleetless
+          repositories: app-starter
+          permission-contents: write
+      - name: tag
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+        run: node .github/release/release.mjs create-tag --version "$VERSION" --sha "$COMMIT"
+      - name: the GitHub release, with that version's notes
+        id: release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          node .github/release/release.mjs changelog-section --file CHANGELOG.md --version "$VERSION" > "$RUNNER_TEMP/notes.md"
+          node .github/release/release.mjs github-release --version "$VERSION" --notes-file "$RUNNER_TEMP/notes.md"
+          echo "done=true" >> "$GITHUB_OUTPUT"
+      - name: summary
+        if: always()
+        env:
+          # The summary runs under `if: always()`, so it reads what the step
+          # before it reached rather than asserting it: an unconditional line
+          # would announce a release the run never made.
+          RELEASED: ${{ steps.release.outputs.done }}
+        run: |
+          {
+            echo "### app-starter v$VERSION — ${{ job.status }}"
+            echo
+            echo "- release commit: \`$COMMIT\`"
+            if [ "$RELEASED" = true ]; then
+              echo "- the GitHub release v$VERSION carries CHANGELOG.md's notes for it"
+            else
+              echo "- no GitHub release: the run did not finish the release step"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

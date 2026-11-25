@@ -1,0 +1,219 @@
+# Fleetless App Starter
+
+**Your robot, as an app. This is where the app starts.**
+
+A template on [`@fleetless/sdk`](https://www.npmjs.com/package/@fleetless/sdk)
+and the [Nuxt UI dashboard](https://github.com/nuxt-ui-templates/dashboard):
+every screen an app user can reach, already built. Sign-in, registration,
+verification, invitations, password reset, single sign-on, the MCP consent
+screen; the robots the signed-in person reaches; and on each robot every
+datapoint, action, service, publisher, camera, run history and asset their
+role reaches. Fleetless has no end-user UI of its own. This is yours.
+
+What a screen shows is decided by the person's **role**, an organization role
+set up in the [Fleetless Console](https://console.fleetless.dev) and re-read on
+every call. A role that reaches nothing sees a polite empty page; a role that
+reaches everything sees it all. The app does not decide, it draws.
+
+## 🚀 Run it
+
+Node 22 and pnpm (`corepack enable`).
+
+```sh
+pnpm install
+cp .env.example .env      # fill in NUXT_PUBLIC_APP_IDENTIFIER
+pnpm dev                  # http://localhost:3000
+```
+
+`NUXT_PUBLIC_API_URL` is the cloud the app talks to: `http://localhost:8080`
+for a local dev stack, `https://api.fleetless.dev` for the real one.
+
+Reaching the dev server by DNS name — a tunnel, a machine on the office
+network — means listing that name in `NUXT_DEV_ALLOWED_HOSTS`. Vite refuses
+a host header it was not told about, which is what stops a DNS-rebinding
+attack on your dev server; localhost and plain IP addresses need no entry.
+
+**Or in Docker**, with nothing on this machine but Docker:
+
+```sh
+cp .env.example .env      # fill in NUXT_PUBLIC_APP_IDENTIFIER
+docker compose up         # http://localhost:3000
+```
+
+The first start installs the dependencies into a volume; later starts skip
+that. The checkout is mounted, so an edit here reaches the browser as with
+`pnpm dev`. Compose reads two more lines of `.env`:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `PORT` | `3000` | The port on this machine and in the container. The app's origin, and with it `allowed_origins`, follows. |
+| `CHOKIDAR_USEPOLLING` | `false` | `true` when an edit does not reach the browser: Docker Desktop on Windows passes no file events from a checkout on a Windows drive. |
+
+A command inside runs as `docker compose exec app pnpm typecheck`. Ctrl-C
+stops the container; `docker compose down -v` removes it with its volumes.
+On Linux, Docker leaves two empty folders owned by root, `node_modules` and
+`.nuxt`: the mount points. `rmdir node_modules .nuxt` clears them before a
+`pnpm install` on this machine.
+
+## 🧭 Set it up in the console
+
+**Or let an agent do it.** [`AGENT-SETUP.md`](AGENT-SETUP.md) is a prompt to
+paste into an MCP client connected to `https://mcp.fleetless.dev`; it performs
+every step below and reports the `.env` line and the invitation. The steps
+stay here for the person who wants to see each setting.
+
+Five settings, in this order. Each names the refusal you see without it, so
+you can tell a missing setting from a broken app.
+
+1. **Create an app** on the Apps page. Its identifier goes into `.env` as
+   `NUXT_PUBLIC_APP_IDENTIFIER`. (Without it: every call answers `not_found`.)
+2. **Registration page.** `allowed_origins`: `http://localhost:3000`, a bare
+   origin, no path, no trailing slash. (Without it: every call fails as a
+   network error with no status and no body — the browser refuses the answer
+   before your code sees it.)
+
+   Optional, once the starter runs somewhere the people you invite can
+   reach: on the app's **Sign-in** page, under **Pages**, switch
+   Invitation, Email verification, Password reset and MCP sign-in to
+   **Your app** with these URLs. Until then Fleetless's hosted pages
+   answer every mailed link and the MCP sign-in, so nothing here needs
+   them.
+
+   | Setting | Value |
+   |---|---|
+   | `verify_url` | `http://localhost:3000/auth/verify/{token}` |
+   | `reset_url` | `http://localhost:3000/auth/reset/{token}` |
+   | `invite_url` | `http://localhost:3000/auth/invite/{token}` |
+   | `mcp_login_url` | `http://localhost:3000/mcp/{interaction}` (with `mcp_enabled` on) |
+
+3. **Access page.** `default_role`: the role a self-registered account gets,
+   and the one an invitation carries when it names none. (Without it:
+   registration answers `target_state_conflict`.)
+4. **Roles page.** An organization starts with the roles `observe`, `operate`
+   and `admin`; `operate` is the one for the first user unless you made your
+   own. Nothing is ticked per role and app: what a role reaches lives in each
+   robot's `fleetless.yaml` and in the organization's defaults per kind,
+   explained in
+   [Roles and Rights](https://docs.fleetless.dev/concepts/roles-and-rights/).
+   **View as role** on the app's Access page shows what the role reaches,
+   robot by robot. (Without it: sign-in works, and a role that reaches nothing
+   sees an empty robot list.)
+5. **Attach a robot** to the app on its page, and **create or invite an app
+   user** on the Users page. That user signs in here with a password or an
+   emailed code, whichever the app's **Sign-in** page turns on (password by
+   default). If that page requires two-factor, the starter sets it up at the
+   first sign-in. Your own console login will not: it is a Fleetless user, a
+   different identity space.
+
+Then sign in. The robot appears; click it.
+
+## 📒 Data: collections
+
+A robot is not the only thing an app keeps track of. [`collections.yaml`](collections.yaml)
+is the schema of the app's own data: collections of records, their fields,
+and the roles that may read and write them. There is one such document per
+app. The starter ships one collection, a `logbook` that belongs to robots, and
+the **Logbook** tab on the robot page reads it, follows it live, reads it again
+when a lost connection comes back and adds entries to it. It reads the list once
+the cloud has confirmed the live subscription (the SDK's `onReady`), so no entry
+written meanwhile falls between the list and the changes that follow. If the
+confirmation does not come within a few seconds (a network that blocks the
+WebSocket, say), it reads the list once anyway, and again when the
+confirmation arrives. The tab sits after the others on every robot where the role
+shows something, and on its own on a robot where the role may read the logbook
+and nothing else. Until a schema is published it says
+`No logbook yet. Publish collections.yaml to add one.`, and **Check again**
+reads it once more after you have published.
+
+Nothing is stored until a developer publishes the schema. Do it in the
+console, or with an assistant on the central MCP endpoint, the one
+[`AGENT-SETUP.md`](AGENT-SETUP.md) uses:
+
+1. `console_collections_write`, action `draft_put`, with the text of
+   `collections.yaml` for your app. A document that is not valid is refused
+   with the path of the fault; a valid one is answered with its preview.
+2. `console_collections_write`, action `publish`. A publish that would change
+   data already stored answers a preview first, with a `confirm` token: read
+   it, then call `publish` again with that token. The logbook has no stored
+   data to change, so its first publish goes through at once.
+
+Have the assistant call `docs` with action `describe` before each action, as
+`AGENT-SETUP.md` does; the exact inputs are there. `console_collections_read`
+shows the draft and the published versions.
+
+`access` in the file decides who may do what. It names the **role keys** of
+your organisation (`observe`, `operate` and `admin` unless you changed them):
+
+| Right | Granted to | What it means here |
+|---|---|---|
+| `read` | `observe`, `operate`, `admin` | See the entries of the robots they reach |
+| `create` | `operate`, `admin` | Use the form on the tab |
+| `update` | `admin` for every entry, `operate` for their own | Not used by the tab |
+| `delete` | `admin` | Not used by the tab |
+
+A right that is not listed goes to no role, and a key your organisation does
+not have grants nothing; the preview warns about it. Developers and server
+keys reach the records of every robot attached to the app whatever `access`
+says. Rights take effect when you publish. A role without `read` sees the same
+`No logbook yet` as an app without a schema, because a collection their role
+may not read does not exist for them.
+
+What else a schema can hold, what a publish does to stored data, and import
+and export are in [App Data](https://docs.fleetless.dev/concepts/app-data/).
+
+## 🎨 Make it yours
+
+- `app/app.config.ts` — the app's name, its description, the four brand
+  files, the primary colour.
+- `public/brand/` — four files, replaced in place; nothing reads them by
+  another name. `icon-light.svg` and `logo-light.svg` are dark ink for a
+  light ground; `icon-dark.svg` and `logo-dark.svg` are light ink for a dark
+  one. The page picks by theme, because an `<img>` takes no colour from the
+  document around it. The favicon is the dark-ground icon for both tab
+  strips.
+- Add a page under `app/pages/`; the auth guard covers it. Add a tab to the
+  robot page by extending `tabsFor` in `app/utils/datasheet.ts`.
+
+## 🗂️ What is where
+
+| Path | What |
+|---|---|
+| `app/plugins/fleetless.client.ts` | The one SDK client, with a `localStorage` token store. |
+| `app/composables/useSession.ts` | Who is signed in, and where an expired session goes. |
+| `app/middleware/auth.global.ts` | Everything but `/auth/*` and `/mcp/*` needs a session. |
+| `app/pages/auth/*` | Login, register, verify, forgot, reset, invite, the OIDC callback. |
+| `app/composables/useSignInResult.ts` | Where every sign-in result goes: signed in, or on to the second factor. |
+| `app/pages/auth/two-factor/*` | The second factor: the code or a recovery code, and the setup an app can require. |
+| `app/pages/account/security.vue` | Two-factor on or off, from the user menu's `Security`. |
+| `app/pages/mcp/[interaction].vue` | The consent screen an AI tool sends its user to. |
+| `app/pages/robots/*` | The list, and the robot page whose tabs come from the datasheet. |
+| `app/components/robot/ParameterForm.vue` | A form from a datasheet's `input_schema`. |
+| `collections.yaml` | The schema of the app's own data: the logbook. Published in the console or by an agent. |
+| `app/composables/useLogbook.ts` | One robot's logbook: the list, then every change, and adding an entry. |
+| `app/components/robot/Logbook.vue` | The Logbook tab. |
+| `app/utils/errors.ts` | Every refusal's one sentence. |
+| `docker-compose.yaml` | The dev server in a container, for a machine with Docker and no Node. |
+
+The SDK reference at [docs.fleetless.dev](https://docs.fleetless.dev/reference/sdk/)
+is the reference for everything this app calls; [manage users and
+roles](https://docs.fleetless.dev/concepts/manage-users-and-roles/) explains
+the model and the refusals behind `app/pages/auth/*`.
+
+## 🧪 Checks
+
+```sh
+pnpm lint && pnpm typecheck && pnpm test && pnpm build
+```
+
+`pnpm generate` writes a static `dist/` any web server can serve; the cloud
+is the only backend.
+
+## 🔒 Reporting a security issue
+
+Email **security@fleetless.dev** rather than opening a public issue. See
+[SECURITY.md](SECURITY.md).
+
+## 📜 Licence
+
+MIT — see [LICENSE](LICENSE). Maintained by
+[Dehne Robotik GmbH](https://dehne-robotik.de). Questions: hello@fleetless.dev.
