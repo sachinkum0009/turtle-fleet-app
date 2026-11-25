@@ -5,6 +5,13 @@ const { starter } = useAppConfig()
 const open = ref(false)
 
 const links = [[{
+  label: 'Control turtle',
+  icon: 'i-lucide-gamepad-2',
+  to: '/turtle',
+  onSelect: () => {
+    open.value = false
+  }
+}, {
   label: 'Robots',
   icon: 'i-lucide-bot',
   to: '/robots',
